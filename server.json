@@ -1,0 +1,155 @@
+const path = require('path');
+const express = require('express');
+const mysql = require('mysql2/promise');
+require('dotenv').config();
+
+const app = express();
+
+const PORT = Number(process.env.PORT || 3329);
+const IMAGE_BASE_URL = process.env.IMAGE_BASE_URL || '/images';
+
+const TABLES = {
+  products: process.env.DB_PRODUCTS_TABLE || 'PRODUCTOS',
+  prices: process.env.DB_PRICES_TABLE || 'PRECIOS',
+  departments: process.env.DB_DEPARTMENTS_TABLE || 'DEPARTAMENTOS',
+  categories: process.env.DB_CATEGORIES_TABLE || 'CATEGORIAS'
+};
+
+const KEYS = {
+  priceJoin: process.env.DB_PRICE_JOIN_KEY || 'PDT_CODIGO',
+  productPk: process.env.DB_PRODUCT_PK || 'PDT_CODIGO'
+};
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  port: Number(process.env.DB_PORT || 3329),
+  user: process.env.DB_USER || 'sistemas',
+  password: process.env.DB_PASSWORD || 'adn',
+  database: process.env.DB_NAME || 'ADN_SEBAS',
+  waitForConnections: true,
+  connectionLimit: 10
+});
+
+function toSafeIdentifier(value, fallback) {
+  const identifier = value || fallback;
+  return /^[A-Za-z0-9_]+$/.test(identifier) ? identifier : fallback;
+}
+
+function toImageUrl(productCode) {
+  const normalizedBase = IMAGE_BASE_URL.replace(/\/$/, '');
+  return `${normalizedBase}/${productCode}.jpg`;
+}
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/api/products', async (req, res) => {
+  const { department, category, search } = req.query;
+
+  const productsTable = toSafeIdentifier(TABLES.products, 'PRODUCTOS');
+  const pricesTable = toSafeIdentifier(TABLES.prices, 'PRECIOS');
+  const productPk = toSafeIdentifier(KEYS.productPk, 'PDT_CODIGO');
+  const priceJoin = toSafeIdentifier(KEYS.priceJoin, 'PDT_CODIGO');
+
+  const params = [];
+  const filters = [];
+
+  if (department) {
+    filters.push('p.DEP_CODIGO = ?');
+    params.push(department);
+  }
+
+  if (category) {
+    filters.push('p.CAT_CODIGO = ?');
+    params.push(category);
+  }
+
+  if (search) {
+    filters.push('(p.PDT_CODIGO LIKE ? OR p.PDT_DESCRIPCION LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`);
+  }
+
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+
+  const sql = `
+    SELECT
+      p.PDT_CODIGO,
+      p.PDT_DESCRIPCION,
+      p.DEP_CODIGO,
+      p.CAT_CODIGO,
+      pr.PRE_PRECIO AS USD,
+      (pr.PRE_PRECIO * PERSONALIZAR_GET_TASA('USD', CURDATE())) AS BS,
+      (pr.PRE_PRECIO * PERSONALIZAR_GET_TASA('COP', CURDATE())) AS COP
+    FROM ${productsTable} p
+    INNER JOIN ${pricesTable} pr
+      ON pr.${priceJoin} = p.${productPk}
+    ${whereClause}
+    ORDER BY p.PDT_DESCRIPCION ASC
+  `;
+
+  try {
+    const [rows] = await pool.query(sql, params);
+    const response = rows.map((row) => ({
+      codigo: row.PDT_CODIGO,
+      descripcion: row.PDT_DESCRIPCION,
+      departamento: row.DEP_CODIGO,
+      categoria: row.CAT_CODIGO,
+      usd: Number(row.USD || 0),
+      bs: Number(row.BS || 0),
+      cop: Number(row.COP || 0),
+      imageUrl: toImageUrl(row.PDT_CODIGO)
+    }));
+
+    return res.json(response);
+  } catch (error) {
+    return res.status(500).json({
+      message: 'Error al consultar productos',
+      detail: error.message
+    });
+  }
+});
+
+app.get('/api/departments', async (_req, res) => {
+  const table = toSafeIdentifier(TABLES.departments, 'DEPARTAMENTOS');
+  const sql = `
+    SELECT DEP_CODIGO, DEP_DESCRIPCION
+    FROM ${table}
+    ORDER BY DEP_DESCRIPCION ASC
+  `;
+
+  try {
+    const [rows] = await pool.query(sql);
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({
+      message: 'Error al consultar departamentos',
+      detail: error.message
+    });
+  }
+});
+
+app.get('/api/categories', async (_req, res) => {
+  const table = toSafeIdentifier(TABLES.categories, 'CATEGORIAS');
+  const sql = `
+    SELECT CAT_CODIGO, CAT_DESCRIPCION
+    FROM ${table}
+    ORDER BY CAT_DESCRIPCION ASC
+  `;
+
+  try {
+    const [rows] = await pool.query(sql);
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({
+      message: 'Error al consultar categorías',
+      detail: error.message
+    });
+  }
+});
+
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.listen(PORT, () => {
+  console.log(`Servidor iniciado en http://localhost:${PORT}`);
+});
